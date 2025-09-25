@@ -1,0 +1,1 @@
+python viewer.py --pointcloud data/points3D.ply --poses data/images.txt
