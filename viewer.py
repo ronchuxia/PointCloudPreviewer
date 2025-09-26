@@ -215,18 +215,10 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
             frustum = create_camera_frustum(pose, size=0.1)  # Red
             geometries.append(frustum)
 
-            # Add coordinate frame
-            frame = create_coordinate_frame(pose, size=0.08)
-            geometries.append(frame)
-
-    # Add world coordinate frame
-    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
-    geometries.append(world_frame)
-
     # Launch visualizer with custom settings
-    vis = o3d.visualization.Visualizer()
+    vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window(
-        window_name="3D Point Cloud and Camera Poses Viewer",
+        window_name="3D Point Cloud and Camera Poses Viewer - Press N/P for next/prev camera",
         width=1200,
         height=800,
         left=50,
@@ -238,8 +230,55 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
 
     # Get render option and adjust point size
     render_option = vis.get_render_option()
-    render_option.point_size = 2.0  # Make points more visible
+    render_option.point_size = args.point_size  # Make points more visible
     render_option.background_color = np.array([0.1, 0.1, 0.1])  # Dark background
+
+    # Coordinate frames toggling
+    coord_frames = []
+
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+    coord_frames.append(world_frame)
+
+    if camera_poses_path:
+        for i, pose in enumerate(poses):
+            if i > 5:
+                break
+            frame = create_coordinate_frame(pose, size=0.08)
+            coord_frames.append(frame)
+
+    frames_visible = False
+
+    def toggle_frames():
+        nonlocal frames_visible
+        frames_visible = not frames_visible
+        for frame in coord_frames:
+            if frames_visible:
+                vis.add_geometry(frame)
+            else:
+                vis.remove_geometry(frame)
+        vis.update_renderer()
+        print(f"Coordinate frames: {'ON' if frames_visible else 'OFF'}")
+
+    # Camera switching
+    if camera_poses_path:
+        current_camera_index = -1
+
+        def switch_to_camera(index):
+            nonlocal current_camera_index
+            current_camera_index = index
+            pose = poses[index]
+            view_control = vis.get_view_control()
+
+            # Set camera position using extrinsic matrix
+            cam_params = view_control.convert_to_pinhole_camera_parameters()
+            cam_params.extrinsic = np.linalg.inv(pose)
+            view_control.convert_from_pinhole_camera_parameters(cam_params)
+            print(f"Camera {index + 1}/{len(poses)}")
+
+        vis.register_key_callback(ord("N"), lambda _: switch_to_camera((current_camera_index + 1) % len(poses)) or False)
+        vis.register_key_callback(ord("P"), lambda _: switch_to_camera((current_camera_index - 1) % len(poses)) or False)
+
+    vis.register_key_callback(ord("F"), lambda _: toggle_frames() or False)
 
     vis.run()
     vis.destroy_window()
@@ -257,6 +296,8 @@ def main():
                        help="Format of camera poses file (e.g., 'colmap_txt', 'nerf_json'). If not provided, auto-detected based on file extension.")
     parser.add_argument("--use_sh", action='store_true',
                        help="Use SH coefficients for coloring 3DGS point clouds")
+    parser.add_argument("--point_size", type=float, default=2.0,
+                       help="Point size for visualization")
 
     args = parser.parse_args()
 
