@@ -7,18 +7,72 @@ Designed to debug alignment issues between SLAM camera poses and 3DGS point clou
 import open3d as o3d
 import numpy as np
 import argparse
+import json
 from pathlib import Path
+from plyfile import PlyData
 
 
-def load_point_cloud(file_path, format=None):
+def load_point_cloud(file_path, args):
     """Load point cloud from various formats"""
-    pcd = o3d.io.read_point_cloud(str(file_path))
+
+    # Check if this is a 3DGS file by looking for SH coefficients
+    if args.pointcloud_format == "3dgs":
+        # Custom loader for 3DGS PLY files. The normals in the 3dgs files are zero, so we ignore them.
+        pcd = load_point_cloud_3dgs(file_path, use_sh=args.use_sh)
+    else:
+        pcd = o3d.io.read_point_cloud(str(file_path))
+
+    print(f"Loaded point cloud from {file_path} with {len(pcd.points)} points")
+
     return pcd
 
-def load_camera_poses(file_path, format="colmap_txt"):
+
+def load_point_cloud_3dgs(file_path, use_sh=False):
+    """Load point cloud from 3DGS PLY file"""
+    print(f"Loading 3DGS from {file_path}")
+    plydata = PlyData.read(file_path)
+    vertices = plydata['vertex']
+
+    pcd = o3d.geometry.PointCloud()
+
+    x = vertices['x']
+    y = vertices['y']
+    z = vertices['z']
+    points = np.stack([x, y, z], axis=1)
+
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # Extract SH DC coefficients (0th order) for RGB
+    sh_dc_0 = vertices['f_dc_0']  # Red channel
+    sh_dc_1 = vertices['f_dc_1']  # Green channel
+    sh_dc_2 = vertices['f_dc_2']  # Blue channel
+
+    colors = np.stack([sh_dc_0, sh_dc_1, sh_dc_2], axis=1)
+
+    if use_sh:
+        C0 = 0.28209479177387814
+        colors = 0.5 + C0 * colors  # Transform from SH to color space
+    colors = np.clip(colors, 0, 1)  # Clamp to valid range
+
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    return pcd
+
+
+def load_camera_poses(file_path, format=None):
     """Load camera poses from various formats"""
+    if format is None:
+        # Auto-detect format based on file extension
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext == '.json':
+            format = "nerf_json"
+        elif file_ext == '.txt':
+            format = "colmap_txt"
+
     if format == "colmap_txt":
         poses = load_camera_poses_colmap_txt(file_path)
+    elif format == "nerf_json":
+        poses = load_camera_poses_nerf_json(file_path)
     else:
         poses = []
     return poses
@@ -30,6 +84,17 @@ def load_camera_poses_colmap_txt(file_path):
     Format: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
     """
     poses = []
+
+    # Coordinate system conversion matrix: COLMAP to Open3D
+    # COLMAP: X-right, Y-down, Z-forward
+    # Open3D: X-right, Y-up, Z-back (for proper visualization)
+    coord_transform = np.array([
+        [1,  0,  0, 0],
+        [0, -1,  0, 0],
+        [0,  0, -1, 0],
+        [0,  0,  0, 1]
+    ])
+
     with open(file_path, 'r') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
@@ -56,9 +121,41 @@ def load_camera_poses_colmap_txt(file_path):
             pose[:3, :3] = rot
             pose[:3, 3] = [tx, ty, tz]
 
+            # Apply coordinate system transformation
+            pose = pose @ coord_transform
+
             poses.append(pose)
 
     print(f"Loaded {len(poses)} camera poses from COLMAP format")
+    return poses
+
+
+def load_camera_poses_nerf_json(file_path):
+    """
+    Load camera poses from NeRF-style JSON file
+    Expected format: {"frames": [{"transform_matrix": [[4x4 matrix]]}, ...]}
+    """
+    # Coordinate system conversion matrix: NeRF to Open3D
+    # NeRF typically follows COLMAP convention: X-right, Y-down, Z-forward
+    # Open3D: X-right, Y-up, Z-back (for proper visualization)
+    coord_transform = np.array([
+        [1,  0,  0, 0],
+        [0, -1,  0, 0],
+        [0,  0, -1, 0],
+        [0,  0,  0, 1]
+    ])
+
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+
+    poses = []
+    for frame in data['frames']:
+        transform_matrix = np.array(frame['transform_matrix'])
+        # Apply coordinate system transformation
+        transform_matrix = transform_matrix @ coord_transform
+        poses.append(transform_matrix)
+
+    print(f"Loaded {len(poses)} camera poses from NeRF JSON format")
     return poses
 
 
@@ -97,19 +194,23 @@ def create_coordinate_frame(pose, size=0.2):
     return o3d.geometry.TriangleMesh.create_coordinate_frame(size=size).transform(pose)
 
 
-def visualize_scene(point_cloud_path=None, camera_poses_path=None):
+def visualize_scene(point_cloud_path, camera_poses_path, args):
     """Main visualization function"""
     geometries = []
 
     # Load and add point cloud
-    pcd = load_point_cloud(point_cloud_path)
-    geometries.append(pcd)
+    if point_cloud_path:
+        pcd = load_point_cloud(point_cloud_path, args)
+        geometries.append(pcd)
 
     # Load and add camera poses
     if camera_poses_path:
-        poses = load_camera_poses(camera_poses_path, format="colmap_txt")
+        poses = load_camera_poses(camera_poses_path, args.pose_format)
 
         for i, pose in enumerate(poses):
+            if i > 5:  # Limit number of cameras for clarity
+                break
+
             # Create camera frustum
             frustum = create_camera_frustum(pose, size=0.1)  # Red
             geometries.append(frustum)
@@ -121,7 +222,6 @@ def visualize_scene(point_cloud_path=None, camera_poses_path=None):
     # Add world coordinate frame
     world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
     geometries.append(world_frame)
-
 
     # Launch visualizer with custom settings
     vis = o3d.visualization.Visualizer()
@@ -149,14 +249,21 @@ def main():
     parser = argparse.ArgumentParser(description="3D Viewer for Point Clouds and Camera Poses")
     parser.add_argument("--pointcloud", "-p", type=str,
                        help="Path to point cloud file (.ply, .pcd, .xyz, .pts)")
-    parser.add_argument("--poses", "-c", type=str,
+    parser.add_argument("--pose", "-c", type=str,
                        help="Path to camera poses file")
+    parser.add_argument("--pointcloud_format", type=str, default=None,
+                       help="Format of point cloud file (e.g., '3dgs')")
+    parser.add_argument("--pose_format", type=str, default=None,
+                       help="Format of camera poses file (e.g., 'colmap_txt', 'nerf_json'). If not provided, auto-detected based on file extension.")
+    parser.add_argument("--use_sh", action='store_true',
+                       help="Use SH coefficients for coloring 3DGS point clouds")
 
     args = parser.parse_args()
 
     visualize_scene(
         point_cloud_path=args.pointcloud,
-        camera_poses_path=args.poses
+        camera_poses_path=args.pose,
+        args=args
     )
 
 
