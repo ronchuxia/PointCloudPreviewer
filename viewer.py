@@ -196,6 +196,7 @@ def create_coordinate_frame(pose, size=0.2):
 
 def visualize_scene(point_cloud_path, camera_poses_path, args):
     """Main visualization function"""
+    num_cameras_to_draw = 50  # Limit number of cameras drawn for clarity
     geometries = []
 
     # Load and add point cloud
@@ -208,7 +209,7 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
         poses = load_camera_poses(camera_poses_path, args.pose_format)
 
         for i, pose in enumerate(poses):
-            if i > 5:  # Limit number of cameras for clarity
+            if i > num_cameras_to_draw:  # Limit number of cameras for clarity
                 break
 
             # Create camera frustum
@@ -233,6 +234,7 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
     render_option.point_size = args.point_size  # Make points more visible
     render_option.background_color = np.array([0.1, 0.1, 0.1])  # Dark background
 
+
     # Coordinate frames toggling
     coord_frames = []
 
@@ -241,7 +243,7 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
 
     if camera_poses_path:
         for i, pose in enumerate(poses):
-            if i > 5:
+            if i > num_cameras_to_draw:
                 break
             frame = create_coordinate_frame(pose, size=0.08)
             coord_frames.append(frame)
@@ -258,6 +260,57 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
                 vis.remove_geometry(frame)
         vis.update_renderer()
         print(f"Coordinate frames: {'ON' if frames_visible else 'OFF'}")
+
+
+    # Blender-style navigation
+    move_speed = 0.05
+
+    def adjust_speed(faster):
+        nonlocal move_speed
+        if faster:
+            move_speed *= 1.5
+        else:
+            move_speed /= 1.5
+        print(f"Move speed: {move_speed:.3f}")
+
+    def move_camera(direction):
+        view_control = vis.get_view_control()
+        cam_params = view_control.convert_to_pinhole_camera_parameters()
+
+        # Get current camera orientation
+        W2C = cam_params.extrinsic
+        C2W = np.linalg.inv(W2C)
+        R = C2W[:3, :3]
+        t = C2W[:3, 3]
+
+        # Camera coordinate system: right, up, forward vectors
+        # Note: This is for OpenCV/COLMAP coord system
+        right = R[:, 0]  # X axis
+        up = -R[:, 1]    # -Y axis 
+        forward = R[:, 2]  # Z axis
+
+        # Apply movement
+        if direction == "forward":
+            new_t = t + forward * move_speed
+        elif direction == "backward":
+            new_t = t - forward * move_speed
+        elif direction == "left":
+            new_t = t - right * move_speed
+        elif direction == "right":
+            new_t = t + right * move_speed
+        elif direction == "up":
+            new_t = t + up * move_speed
+        elif direction == "down":
+            new_t = t - up * move_speed
+
+        # Update camera position
+        new_C2W = np.eye(4)
+        new_C2W[:3, :3] = R
+        new_C2W[:3, 3] = new_t
+        new_W2C = np.linalg.inv(new_C2W)
+        cam_params.extrinsic = new_W2C
+        view_control.convert_from_pinhole_camera_parameters(cam_params)
+
 
     # Camera switching
     if camera_poses_path:
@@ -278,7 +331,18 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
         vis.register_key_callback(ord("N"), lambda _: switch_to_camera((current_camera_index + 1) % len(poses)) or False)
         vis.register_key_callback(ord("P"), lambda _: switch_to_camera((current_camera_index - 1) % len(poses)) or False)
 
+
+    # Navigation controls
+    vis.register_key_callback(ord("W"), lambda _: move_camera("forward") or False)
+    vis.register_key_callback(ord("S"), lambda _: move_camera("backward") or False)
+    vis.register_key_callback(ord("A"), lambda _: move_camera("left") or False)
+    vis.register_key_callback(ord("D"), lambda _: move_camera("right") or False)
+    vis.register_key_callback(ord("Q"), lambda _: move_camera("up") or False)
+    vis.register_key_callback(ord("E"), lambda _: move_camera("down") or False)
+
     vis.register_key_callback(ord("F"), lambda _: toggle_frames() or False)
+    vis.register_key_callback(ord("T"), lambda _: adjust_speed(True) or False)   # Faster
+    vis.register_key_callback(ord("G"), lambda _: adjust_speed(False) or False)  # Slower
 
     vis.run()
     vis.destroy_window()
