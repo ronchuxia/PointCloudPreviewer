@@ -5,6 +5,8 @@ Designed to debug alignment issues between SLAM camera poses and 3DGS point clou
 """
 
 import open3d as o3d
+import open3d.visualization.gui as gui
+import open3d.visualization.rendering as rendering
 import numpy as np
 import argparse
 import json
@@ -216,204 +218,96 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
             frustum = create_camera_frustum(pose, size=0.1)  # Red
             geometries.append(frustum)
 
-    # Launch visualizer with custom settings
-    vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window(
-        window_name="3D Point Cloud and Camera Poses Viewer - Press N/P for next/prev camera",
-        width=1200,
-        height=800,
-        left=50,
-        top=50
-    )
+    # Launch GUI with fly mode
+    gui.Application.instance.initialize()
+    window = gui.Application.instance.create_window("3D Viewer - Fly Mode", 1200, 800)
 
-    for geometry in geometries:
-        vis.add_geometry(geometry)
+    scene_widget = gui.SceneWidget()
+    scene_widget.scene = rendering.Open3DScene(window.renderer)
+    scene_widget.set_view_controls(gui.SceneWidget.Controls.FLY)
+    window.add_child(scene_widget)
 
-    # Get render option and adjust point size
-    render_option = vis.get_render_option()
-    render_option.point_size = args.point_size  # Make points more visible
-    render_option.background_color = np.array([0.1, 0.1, 0.1])  # Dark background
+    # Add geometries
+    material = rendering.MaterialRecord()
+    for i, geometry in enumerate(geometries):
+        scene_widget.scene.add_geometry(f"geometry_{i}", geometry, material)
 
-
-    # Coordinate frames toggling
-    coord_frames = []
-
+    # Add world coordinate frame
     world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
-    coord_frames.append(world_frame)
+    scene_widget.scene.add_geometry("world_frame", world_frame, material)
 
+    # Add camera coordinate frames
+    coord_frame_names = []
     if camera_poses_path:
         for i, pose in enumerate(poses):
-            if i > num_cameras_to_draw:
+            if i > 50:  # Match camera limit
                 break
             frame = create_coordinate_frame(pose, size=0.08)
-            coord_frames.append(frame)
+            frame_name = f"coord_frame_{i}"
+            scene_widget.scene.add_geometry(frame_name, frame, material)
+            coord_frame_names.append(frame_name)
 
-    frames_visible = False
+    # Set up camera
+    bounds = scene_widget.scene.bounding_box
+    scene_widget.setup_camera(60, bounds, np.array([0, 0, 5], dtype=np.float32))
+    scene_widget.scene.set_background([0.1, 0.1, 0.1, 1.0])
+
+    # Frame toggling state
+    frames_visible = [True]  # Use list for closure, start visible
 
     def toggle_frames():
-        nonlocal frames_visible
-        frames_visible = not frames_visible
-        for frame in coord_frames:
-            if frames_visible:
-                vis.add_geometry(frame)
-            else:
-                vis.remove_geometry(frame)
-        vis.update_renderer()
-        print(f"Coordinate frames: {'ON' if frames_visible else 'OFF'}")
+        frames_visible[0] = not frames_visible[0]
+        # Toggle world frame
+        scene_widget.scene.show_geometry("world_frame", frames_visible[0])
+        # Toggle camera frames
+        for frame_name in coord_frame_names:
+            scene_widget.scene.show_geometry(frame_name, frames_visible[0])
+        print(f"Coordinate frames: {'ON' if frames_visible[0] else 'OFF'}")
 
-
-    # Blender-style navigation
-    move_speed = 0.05
-    rotate_speed = 0.05  # Rotation angle in radians
-
-    def adjust_speed(faster):
-        nonlocal move_speed
-        if faster:
-            move_speed *= 1.5
-        else:
-            move_speed /= 1.5
-        print(f"Move speed: {move_speed:.3f}")
-
-    def adjust_rotate_speed(faster):
-        nonlocal rotate_speed
-        if faster:
-            rotate_speed *= 1.5
-        else:
-            rotate_speed /= 1.5
-        print(f"Rotate speed: {rotate_speed:.3f} rad ({rotate_speed * 180 / np.pi:.1f}°)")
-
-    def move_camera(direction):
-        view_control = vis.get_view_control()
-        cam_params = view_control.convert_to_pinhole_camera_parameters()
-
-        # Get current camera orientation
-        W2C = cam_params.extrinsic
-        C2W = np.linalg.inv(W2C)
-        R = C2W[:3, :3]
-        t = C2W[:3, 3]
-
-        # Camera coordinate system: right, up, forward vectors
-        # Note: This is for OpenCV/COLMAP coord system
-        right = R[:, 0]  # X axis
-        up = -R[:, 1]    # -Y axis
-        forward = R[:, 2]  # Z axis
-
-        # Apply movement
-        if direction == "forward":
-            new_t = t + forward * move_speed
-        elif direction == "backward":
-            new_t = t - forward * move_speed
-        elif direction == "left":
-            new_t = t - right * move_speed
-        elif direction == "right":
-            new_t = t + right * move_speed
-        elif direction == "up":
-            new_t = t + up * move_speed
-        elif direction == "down":
-            new_t = t - up * move_speed
-
-        # Update camera position
-        new_C2W = np.eye(4)
-        new_C2W[:3, :3] = R
-        new_C2W[:3, 3] = new_t
-        new_W2C = np.linalg.inv(new_C2W)
-        cam_params.extrinsic = new_W2C
-        view_control.convert_from_pinhole_camera_parameters(cam_params)
-
-    def rotate_camera(axis, angle):
-        view_control = vis.get_view_control()
-        cam_params = view_control.convert_to_pinhole_camera_parameters()
-
-        # Get current camera pose
-        W2C = cam_params.extrinsic
-        C2W = np.linalg.inv(W2C)
-        R = C2W[:3, :3]
-        t = C2W[:3, 3]
-
-        # Camera coordinate system axes
-        right = R[:, 0]   # X axis
-        up = -R[:, 1]     # -Y axis
-        forward = R[:, 2] # Z axis
-
-        # Create rotation matrix around the specified axis
-        if axis == "pitch":  # Rotate around right (X) axis
-            rot_axis = right
-        elif axis == "yaw":  # Rotate around up (Y) axis
-            rot_axis = up
-        elif axis == "roll": # Rotate around forward (Z) axis
-            rot_axis = forward
-        else:
-            return
-
-        # Rodrigues' rotation formula
-        cos_angle = np.cos(angle)
-        sin_angle = np.sin(angle)
-        cross_matrix = np.array([
-            [0, -rot_axis[2], rot_axis[1]],
-            [rot_axis[2], 0, -rot_axis[0]],
-            [-rot_axis[1], rot_axis[0], 0]
-        ])
-
-        rotation_matrix = (cos_angle * np.eye(3) +
-                          sin_angle * cross_matrix +
-                          (1 - cos_angle) * np.outer(rot_axis, rot_axis))
-
-        # Apply rotation to camera orientation
-        new_R = rotation_matrix @ R
-
-        # Update camera pose
-        new_C2W = np.eye(4)
-        new_C2W[:3, :3] = new_R
-        new_C2W[:3, 3] = t
-        new_W2C = np.linalg.inv(new_C2W)
-        cam_params.extrinsic = new_W2C
-        view_control.convert_from_pinhole_camera_parameters(cam_params)
-
-
-    # Camera switching
+    # Camera switching for GUI
     if camera_poses_path:
-        current_camera_index = -1
+        current_camera_index = [-1]  # Use list for closure
 
         def switch_to_camera(index):
-            nonlocal current_camera_index
-            current_camera_index = index
-            pose = poses[index]
-            view_control = vis.get_view_control()
+            if 0 <= index < len(poses):
+                current_camera_index[0] = index
+                pose = poses[index]
 
-            # Set camera position using extrinsic matrix
-            cam_params = view_control.convert_to_pinhole_camera_parameters()
-            cam_params.extrinsic = np.linalg.inv(pose)
-            view_control.convert_from_pinhole_camera_parameters(cam_params)
-            print(f"Camera {index + 1}/{len(poses)}")
+                # Extract camera position and orientation
+                position = pose[:3, 3]
+                forward = pose[:3, :3] @ np.array([0, 0, 1])
+                up = pose[:3, :3] @ np.array([0, -1, 0])
 
-        vis.register_key_callback(ord("N"), lambda _: switch_to_camera((current_camera_index + 1) % len(poses)) or False)
-        vis.register_key_callback(ord("P"), lambda _: switch_to_camera((current_camera_index - 1) % len(poses)) or False)
+                # Set camera view
+                scene_widget.look_at(position + forward, position, up)
+                print(f"Camera {index + 1}/{len(poses)}")
 
+        def on_key(event):
+            if event.key == gui.KeyName.N and event.type == gui.KeyEvent.DOWN:
+                next_index = (current_camera_index[0] + 1) % len(poses)
+                switch_to_camera(next_index)
+                return True
+            elif event.key == gui.KeyName.P and event.type == gui.KeyEvent.DOWN:
+                prev_index = (current_camera_index[0] - 1) % len(poses)
+                switch_to_camera(prev_index)
+                return True
+            elif event.key == gui.KeyName.F and event.type == gui.KeyEvent.DOWN:
+                toggle_frames()
+                return True
+            return False
 
-    # Navigation controls
-    vis.register_key_callback(ord("W"), lambda _: move_camera("forward") or False)
-    vis.register_key_callback(ord("S"), lambda _: move_camera("backward") or False)
-    vis.register_key_callback(ord("A"), lambda _: move_camera("left") or False)
-    vis.register_key_callback(ord("D"), lambda _: move_camera("right") or False)
-    vis.register_key_callback(ord("Q"), lambda _: move_camera("up") or False)
-    vis.register_key_callback(ord("E"), lambda _: move_camera("down") or False)
+        window.set_on_key(on_key)
+    else:
+        # Key callback even without camera poses (for frame toggling)
+        def on_key(event):
+            if event.key == gui.KeyName.F and event.type == gui.KeyEvent.DOWN:
+                toggle_frames()
+                return True
+            return False
 
-    vis.register_key_callback(ord("F"), lambda _: toggle_frames() or False)
-    vis.register_key_callback(ord("T"), lambda _: adjust_speed(True) or False)   # Faster
-    vis.register_key_callback(ord("G"), lambda _: adjust_speed(False) or False)  # Slower
-    vis.register_key_callback(ord("Y"), lambda _: adjust_rotate_speed(True) or False)   # Rotate faster
-    vis.register_key_callback(ord("H"), lambda _: adjust_rotate_speed(False) or False)  # Rotate slower
+        window.set_on_key(on_key)
 
-    # Rotation controls
-    vis.register_key_callback(ord("I"), lambda _: rotate_camera("pitch", -rotate_speed) or False)  # Pitch up
-    vis.register_key_callback(ord("K"), lambda _: rotate_camera("pitch", rotate_speed) or False)   # Pitch down
-    vis.register_key_callback(ord("J"), lambda _: rotate_camera("yaw", rotate_speed) or False)     # Yaw left
-    vis.register_key_callback(ord("L"), lambda _: rotate_camera("yaw", -rotate_speed) or False)    # Yaw right
-    vis.register_key_callback(ord("U"), lambda _: rotate_camera("roll", -rotate_speed) or False)    # Roll left
-    vis.register_key_callback(ord("O"), lambda _: rotate_camera("roll", rotate_speed) or False)     # Roll right
-
-    vis.run()
-    vis.destroy_window()
+    gui.Application.instance.run()
 
 
 def main():
