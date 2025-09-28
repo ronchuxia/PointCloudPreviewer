@@ -94,16 +94,6 @@ def load_camera_poses_colmap_txt(file_path):
     """
     poses = []
 
-    # Coordinate system conversion matrix: COLMAP to Open3D
-    # COLMAP: X-right, Y-down, Z-forward
-    # Open3D: X-right, Y-up, Z-back (for proper visualization)
-    coord_transform = np.array([
-        [1,  0,  0, 0],
-        [0, -1,  0, 0],
-        [0,  0, -1, 0],
-        [0,  0,  0, 1]
-    ])
-
     with open(file_path, 'r') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
@@ -126,13 +116,11 @@ def load_camera_poses_colmap_txt(file_path):
             ])
 
             # Create 4x4 transformation matrix
-            pose = np.eye(4)
-            pose[:3, :3] = rot
-            pose[:3, 3] = [tx, ty, tz]
+            extrinsics = np.eye(4)
+            extrinsics[:3, :3] = rot
+            extrinsics[:3, 3] = [tx, ty, tz]
 
-            # Apply coordinate system transformation
-            pose = pose @ coord_transform
-
+            pose = np.linalg.inv(extrinsics)  # Invert to get camera-to-world
             poses.append(pose)
 
     print(f"Loaded {len(poses)} camera poses from COLMAP format")
@@ -152,16 +140,6 @@ def load_camera_poses_colmap_bin(file_path):
     - POINT2D data (skipped for pose extraction)
     """
     poses = []
-
-    # Coordinate system conversion matrix: COLMAP to Open3D
-    # COLMAP: X-right, Y-down, Z-forward
-    # Open3D: X-right, Y-up, Z-back (for proper visualization)
-    coord_transform = np.array([
-        [1,  0,  0, 0],
-        [0, -1,  0, 0],
-        [0,  0, -1, 0],
-        [0,  0,  0, 1]
-    ])
 
     with open(file_path, 'rb') as f:
         # Read number of images
@@ -202,13 +180,11 @@ def load_camera_poses_colmap_bin(file_path):
             ])
 
             # Create 4x4 transformation matrix
-            pose = np.eye(4)
-            pose[:3, :3] = rot
-            pose[:3, 3] = [tx, ty, tz]
-
-            # Apply coordinate system transformation
-            pose = pose @ coord_transform
-
+            extrinsics = np.eye(4)
+            extrinsics[:3, :3] = rot
+            extrinsics[:3, 3] = [tx, ty, tz]
+            
+            pose = np.linalg.inv(extrinsics)  # Invert to get camera-to-world
             poses.append(pose)
 
     print(f"Loaded {len(poses)} camera poses from COLMAP binary format")
@@ -318,6 +294,24 @@ def visualize_scene(point_cloud_path, camera_poses_path, args):
     render_option = vis.get_render_option()
     render_option.point_size = args.point_size  # Make points more visible
     render_option.background_color = np.array([0.1, 0.1, 0.1])  # Dark background
+
+    # Adjust clipping planes for large scenes to prevent clipping
+    if point_cloud_path:
+        view_control = vis.get_view_control()
+
+        # Get scene bounds to calculate appropriate clipping planes
+        bbox = pcd.get_axis_aligned_bounding_box()
+        scene_size = np.linalg.norm(bbox.get_extent())
+
+        # Set near/far clipping planes based on scene size
+        near_plane = scene_size * 0.001  # 0.1% of scene size
+        far_plane = scene_size * 5.0    # 5x scene size
+
+        # Set the clipping planes
+        view_control.set_constant_z_near(near_plane)
+        view_control.set_constant_z_far(far_plane)
+
+        print(f"Scene size: {scene_size:.2f}, Near: {near_plane:.3f}, Far: {far_plane:.1f}")
 
 
     # Coordinate frames toggling

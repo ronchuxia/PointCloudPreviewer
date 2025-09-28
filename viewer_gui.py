@@ -96,16 +96,6 @@ def load_camera_poses_colmap_txt(file_path):
     """
     poses = []
 
-    # Coordinate system conversion matrix: COLMAP to Open3D
-    # COLMAP: X-right, Y-down, Z-forward
-    # Open3D: X-right, Y-up, Z-back (for proper visualization)
-    coord_transform = np.array([
-        [1,  0,  0, 0],
-        [0, -1,  0, 0],
-        [0,  0, -1, 0],
-        [0,  0,  0, 1]
-    ])
-
     with open(file_path, 'r') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
@@ -128,13 +118,11 @@ def load_camera_poses_colmap_txt(file_path):
             ])
 
             # Create 4x4 transformation matrix
-            pose = np.eye(4)
-            pose[:3, :3] = rot
-            pose[:3, 3] = [tx, ty, tz]
+            extrinsics = np.eye(4)
+            extrinsics[:3, :3] = rot
+            extrinsics[:3, 3] = [tx, ty, tz]
 
-            # Apply coordinate system transformation
-            pose = pose @ coord_transform
-
+            pose = np.linalg.inv(extrinsics)  # Invert to get camera-to-world
             poses.append(pose)
 
     print(f"Loaded {len(poses)} camera poses from COLMAP format")
@@ -154,16 +142,6 @@ def load_camera_poses_colmap_bin(file_path):
     - POINT2D data (skipped for pose extraction)
     """
     poses = []
-
-    # Coordinate system conversion matrix: COLMAP to Open3D
-    # COLMAP: X-right, Y-down, Z-forward
-    # Open3D: X-right, Y-up, Z-back (for proper visualization)
-    coord_transform = np.array([
-        [1,  0,  0, 0],
-        [0, -1,  0, 0],
-        [0,  0, -1, 0],
-        [0,  0,  0, 1]
-    ])
 
     with open(file_path, 'rb') as f:
         # Read number of images
@@ -204,13 +182,11 @@ def load_camera_poses_colmap_bin(file_path):
             ])
 
             # Create 4x4 transformation matrix
-            pose = np.eye(4)
-            pose[:3, :3] = rot
-            pose[:3, 3] = [tx, ty, tz]
-
-            # Apply coordinate system transformation
-            pose = pose @ coord_transform
-
+            extrinsics = np.eye(4)
+            extrinsics[:3, :3] = rot
+            extrinsics[:3, 3] = [tx, ty, tz]
+            
+            pose = np.linalg.inv(extrinsics)  # Invert to get camera-to-world
             poses.append(pose)
 
     print(f"Loaded {len(poses)} camera poses from COLMAP binary format")
