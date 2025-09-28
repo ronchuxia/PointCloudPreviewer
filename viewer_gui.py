@@ -10,6 +10,7 @@ import open3d.visualization.rendering as rendering
 import numpy as np
 import argparse
 import json
+import struct
 from pathlib import Path
 from plyfile import PlyData
 
@@ -17,12 +18,16 @@ from plyfile import PlyData
 def load_point_cloud(file_path, args):
     """Load point cloud from various formats"""
 
-    # Check if this is a 3DGS file by looking for SH coefficients
     if args.pointcloud_format == "3dgs":
         # Custom loader for 3DGS PLY files. The normals in the 3dgs files are zero, so we ignore them.
         pcd = load_point_cloud_3dgs(file_path, use_sh=args.use_sh)
     else:
         pcd = o3d.io.read_point_cloud(str(file_path))
+
+        # Clear normals to avoid rendering issues with zero normals
+        # This is especially important for 3DGS PLY files
+        if pcd.has_normals():
+            pcd.normals = o3d.utility.Vector3dVector()
 
     print(f"Loaded point cloud from {file_path} with {len(pcd.points)} points")
 
@@ -70,9 +75,13 @@ def load_camera_poses(file_path, format=None):
             format = "nerf_json"
         elif file_ext == '.txt':
             format = "colmap_txt"
+        elif file_ext == '.bin':
+            format = "colmap_bin"
 
     if format == "colmap_txt":
         poses = load_camera_poses_colmap_txt(file_path)
+    elif format == "colmap_bin":
+        poses = load_camera_poses_colmap_bin(file_path)
     elif format == "nerf_json":
         poses = load_camera_poses_nerf_json(file_path)
     else:
@@ -129,6 +138,82 @@ def load_camera_poses_colmap_txt(file_path):
             poses.append(pose)
 
     print(f"Loaded {len(poses)} camera poses from COLMAP format")
+    return poses
+
+
+def load_camera_poses_colmap_bin(file_path):
+    """
+    Load camera poses from COLMAP images.bin file
+    Binary format: num_images (uint64), then for each image:
+    - IMAGE_ID (uint32)
+    - QW, QX, QY, QZ (4 * double)
+    - TX, TY, TZ (3 * double)
+    - CAMERA_ID (uint32)
+    - NAME (null-terminated string)
+    - num_points2D (uint64)
+    - POINT2D data (skipped for pose extraction)
+    """
+    poses = []
+
+    # Coordinate system conversion matrix: COLMAP to Open3D
+    # COLMAP: X-right, Y-down, Z-forward
+    # Open3D: X-right, Y-up, Z-back (for proper visualization)
+    coord_transform = np.array([
+        [1,  0,  0, 0],
+        [0, -1,  0, 0],
+        [0,  0, -1, 0],
+        [0,  0,  0, 1]
+    ])
+
+    with open(file_path, 'rb') as f:
+        # Read number of images
+        num_images = struct.unpack('<Q', f.read(8))[0]
+
+        for _ in range(num_images):
+            # Read IMAGE_ID
+            image_id = struct.unpack('<I', f.read(4))[0]
+
+            # Read quaternion (QW, QX, QY, QZ)
+            qw, qx, qy, qz = struct.unpack('<4d', f.read(32))
+
+            # Read translation (TX, TY, TZ)
+            tx, ty, tz = struct.unpack('<3d', f.read(24))
+
+            # Read CAMERA_ID
+            camera_id = struct.unpack('<I', f.read(4))[0]
+
+            # Read image name (null-terminated string)
+            name = b''
+            while True:
+                char = f.read(1)
+                if char == b'\0' or not char:
+                    break
+                name += char
+
+            # Read number of 2D points
+            num_points2d = struct.unpack('<Q', f.read(8))[0]
+
+            # Skip 2D point data (each point is 3 * double = 24 bytes)
+            f.seek(num_points2d * 24, 1)
+
+            # Convert quaternion to rotation matrix
+            rot = np.array([
+                [1-2*(qy*qy+qz*qz), 2*(qx*qy-qz*qw), 2*(qx*qz+qy*qw)],
+                [2*(qx*qy+qz*qw), 1-2*(qx*qx+qz*qz), 2*(qy*qz-qx*qw)],
+                [2*(qx*qz-qy*qw), 2*(qy*qz+qx*qw), 1-2*(qx*qx+qy*qy)]
+            ])
+
+            # Create 4x4 transformation matrix
+            pose = np.eye(4)
+            pose[:3, :3] = rot
+            pose[:3, 3] = [tx, ty, tz]
+
+            # Apply coordinate system transformation
+            pose = pose @ coord_transform
+
+            poses.append(pose)
+
+    print(f"Loaded {len(poses)} camera poses from COLMAP binary format")
     return poses
 
 
